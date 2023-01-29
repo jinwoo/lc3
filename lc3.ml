@@ -99,14 +99,10 @@ let read_image { memory; _ } image_path =
           let max_read = memory_max - origin in
           let buf = Bytes.create max_read in
           let read = In_channel.input ic buf 0 max_read in
-          let rec aux pos =
-            if pos >= read then ()
-            else
-              let n = Bytes.get_uint16_be buf pos in
-              memory.(origin + (pos / 2)) <- n;
-              aux (pos + 2)
-          in
-          aux 0)
+          for pos = 0 to read / 2 do
+            let n = Bytes.get_uint16_be buf (pos * 2) in
+            memory.(origin + pos) <- n
+          done)
 
 let original_tio = Unix.tcgetattr Unix.stdin
 
@@ -144,41 +140,45 @@ let mem_read { memory; _ } address =
 let mem_write { memory; _ } address value = memory.(address) <- value
 
 let sign_extend x bit_count =
-  if (x lsr (bit_count - 1)) land 1 <> 0 then x lor (0xffff lsl bit_count)
-  else x
+  if (x lsr (bit_count - 1)) land 1 = 0 then x else x lor (0xffff lsl bit_count)
 
 let update_flags ({ reg; _ } as vm) r =
   let fl =
     if reg.(r) = 0 then fl_zro
-    else if
-      reg.(r) lsr 15 <> 0 (* A 1 in the left-most bit indicates negative. *)
-    then fl_neg
+    else if reg.(r) lsr 15 <> 0 then
+      (* A 1 in the left-most bit indicates negative. *)
+      fl_neg
     else fl_pos
   in
   vm.cond <- fl
+
+(** [x +^ y] is 16-bit addition with 2's complement semantics. *)
+let ( +^ ) x y = (x + y) land 0xffff
 
 let exec_add ({ reg; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let r1 = (instr lsr 6) land 0x7 in
   let imm_flag = (instr lsr 5) land 0x1 in
-  (if imm_flag <> 0 then
-   let imm5 = sign_extend (instr land 0x1f) 5 in
-   reg.(r0) <- (reg.(r1) + imm5) land 0xffff
-  else
-    let r2 = instr land 0x7 in
-    reg.(r0) <- (reg.(r1) + reg.(r2)) land 0xffff);
+  let operand =
+    if imm_flag = 0 then
+      let r2 = instr land 0x7 in
+      reg.(r2)
+    else sign_extend (instr land 0x1f) 5
+  in
+  reg.(r0) <- reg.(r1) +^ operand;
   update_flags vm r0
 
 let exec_and ({ reg; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let r1 = (instr lsr 6) land 0x7 in
   let imm_flag = (instr lsr 5) land 0x1 in
-  (if imm_flag <> 0 then
-   let imm5 = sign_extend (instr land 0x1f) 5 in
-   reg.(r0) <- reg.(r1) land imm5
-  else
-    let r2 = instr land 0x7 in
-    reg.(r0) <- reg.(r1) land reg.(r2));
+  let operand =
+    if imm_flag = 0 then
+      let r2 = instr land 0x7 in
+      reg.(r2)
+    else sign_extend (instr land 0x1f) 5
+  in
+  reg.(r0) <- reg.(r1) land operand;
   update_flags vm r0
 
 let exec_not ({ reg; _ } as vm) instr =
@@ -190,7 +190,7 @@ let exec_not ({ reg; _ } as vm) instr =
 let exec_br ({ cond; pc; _ } as vm) instr =
   let pc_offset = sign_extend (instr land 0x1ff) 9 in
   let cond_flag = (instr lsr 9) land 0x7 in
-  if cond_flag land cond <> 0 then vm.pc <- (pc + pc_offset) land 0xffff
+  if cond_flag land cond <> 0 then vm.pc <- pc +^ pc_offset
 
 let exec_jmp ({ reg; _ } as vm) instr =
   let r1 = (instr lsr 6) land 0x7 in
@@ -198,56 +198,57 @@ let exec_jmp ({ reg; _ } as vm) instr =
 
 let exec_jsr ({ reg; pc; _ } as vm) instr =
   let long_flag = (instr lsr 11) land 1 in
+  let dest =
+    if long_flag = 0 then
+      let r1 = (instr lsr 6) land 0x7 in
+      reg.(r1)
+    else
+      let long_pc_offset = sign_extend (instr land 0x7ff) 11 in
+      pc +^ long_pc_offset
+  in
   reg.(7) <- pc;
-  if long_flag <> 0 then
-    (* JSR *)
-    let long_pc_offset = sign_extend (instr land 0x7ff) 11 in
-    vm.pc <- (pc + long_pc_offset) land 0xffff
-  else
-    (* JSRR *)
-    let r1 = (instr lsr 6) land 0x7 in
-    vm.pc <- reg.(r1)
+  vm.pc <- dest
 
 let exec_ld ({ reg; pc; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let pc_offset = sign_extend (instr land 0x1ff) 9 in
-  reg.(r0) <- mem_read vm ((pc + pc_offset) land 0xffff);
+  reg.(r0) <- mem_read vm (pc +^ pc_offset);
   update_flags vm r0
 
 let exec_ldi ({ reg; pc; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let pc_offset = sign_extend (instr land 0x1ff) 9 in
-  reg.(r0) <- mem_read vm (mem_read vm ((pc + pc_offset) land 0xffff));
+  reg.(r0) <- mem_read vm (mem_read vm (pc +^ pc_offset));
   update_flags vm r0
 
 let exec_ldr ({ reg; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let r1 = (instr lsr 6) land 0x7 in
   let offset = sign_extend (instr land 0x3f) 6 in
-  reg.(r0) <- mem_read vm ((reg.(r1) + offset) land 0xffff);
+  reg.(r0) <- mem_read vm (reg.(r1) +^ offset);
   update_flags vm r0
 
 let exec_lea ({ reg; pc; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let pc_offset = sign_extend (instr land 0x1ff) 9 in
-  reg.(r0) <- (pc + pc_offset) land 0xffff;
+  reg.(r0) <- pc +^ pc_offset;
   update_flags vm r0
 
 let exec_st ({ reg; pc; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let pc_offset = sign_extend (instr land 0x1ff) 9 in
-  mem_write vm ((pc + pc_offset) land 0xffff) reg.(r0)
+  mem_write vm (pc +^ pc_offset) reg.(r0)
 
 let exec_sti ({ reg; pc; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let pc_offset = sign_extend (instr land 0x1ff) 9 in
-  mem_write vm (mem_read vm ((pc + pc_offset) land 0xffff)) reg.(r0)
+  mem_write vm (mem_read vm (pc +^ pc_offset)) reg.(r0)
 
 let exec_str ({ reg; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let r1 = (instr lsr 6) land 0x7 in
   let offset = sign_extend (instr land 0x3f) 6 in
-  mem_write vm ((reg.(r1) + offset) land 0xffff) reg.(r0)
+  mem_write vm (reg.(r1) +^ offset) reg.(r0)
 
 let exec_trap_getc ({ reg; _ } as vm) =
   reg.(0) <- input_char stdin |> int_of_char;
