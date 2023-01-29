@@ -1,0 +1,3 @@
+(executable
+ (name lc3)
+ (libraries unix))
