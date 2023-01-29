@@ -5,29 +5,28 @@ let mr_kbdr = 0xfe02 (* keyboard data *)
 (* Memory *)
 let memory_max = 1 lsl 16
 
-(* Registers *)
-let r_r0 = 0
-let r_r7 = 7
-let r_pc = 8
-let r_cond = 9
-let r_count = 10
-
 (* Condition flags *)
 let fl_pos = 1 lsl 0
 let fl_zro = 1 lsl 1
 let fl_neg = 1 lsl 2
 
-type vm = { memory : int array; reg : int array; mutable running : bool }
+type vm = {
+  memory : int array;
+  reg : int array;
+  mutable cond : int;
+  mutable pc : int;
+  mutable running : bool;
+}
 
 let make_vm () =
   let memory = Array.make memory_max 0 in
-  let reg = Array.make r_count 0 in
+  let reg = Array.make 8 0 in
   (* Since exactly one condition flag should be set at any given time,
      set the Z flag. *)
-  reg.(r_cond) <- fl_zro;
+  let cond = fl_zro in
   (* Set the PC to starting position. 0x3000 is the default. *)
-  reg.(r_pc) <- 0x3000;
-  { memory; reg; running = true }
+  let pc = 0x3000 in
+  { memory; reg; cond; pc; running = true }
 
 type opcode =
   | Op_br (* branch *)
@@ -148,7 +147,7 @@ let sign_extend x bit_count =
   if (x lsr (bit_count - 1)) land 1 <> 0 then x lor (0xffff lsl bit_count)
   else x
 
-let update_flags { reg; _ } r =
+let update_flags ({ reg; _ } as vm) r =
   let fl =
     if reg.(r) = 0 then fl_zro
     else if
@@ -156,7 +155,7 @@ let update_flags { reg; _ } r =
     then fl_neg
     else fl_pos
   in
-  reg.(r_cond) <- fl
+  vm.cond <- fl
 
 let exec_add ({ reg; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
@@ -188,38 +187,37 @@ let exec_not ({ reg; _ } as vm) instr =
   reg.(r0) <- lnot reg.(r1) land 0xffff;
   update_flags vm r0
 
-let exec_br { reg; _ } instr =
+let exec_br ({ cond; pc; _ } as vm) instr =
   let pc_offset = sign_extend (instr land 0x1ff) 9 in
   let cond_flag = (instr lsr 9) land 0x7 in
-  if cond_flag land reg.(r_cond) <> 0 then
-    reg.(r_pc) <- (reg.(r_pc) + pc_offset) land 0xffff
+  if cond_flag land cond <> 0 then vm.pc <- (pc + pc_offset) land 0xffff
 
-let exec_jmp { reg; _ } instr =
+let exec_jmp ({ reg; _ } as vm) instr =
   let r1 = (instr lsr 6) land 0x7 in
-  reg.(r_pc) <- reg.(r1)
+  vm.pc <- reg.(r1)
 
-let exec_jsr { reg; _ } instr =
+let exec_jsr ({ reg; pc; _ } as vm) instr =
   let long_flag = (instr lsr 11) land 1 in
-  reg.(r_r7) <- reg.(r_pc);
+  reg.(7) <- pc;
   if long_flag <> 0 then
     (* JSR *)
     let long_pc_offset = sign_extend (instr land 0x7ff) 11 in
-    reg.(r_pc) <- (reg.(r_pc) + long_pc_offset) land 0xffff
+    vm.pc <- (pc + long_pc_offset) land 0xffff
   else
     (* JSRR *)
     let r1 = (instr lsr 6) land 0x7 in
-    reg.(r_pc) <- reg.(r1)
+    vm.pc <- reg.(r1)
 
-let exec_ld ({ reg; _ } as vm) instr =
+let exec_ld ({ reg; pc; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let pc_offset = sign_extend (instr land 0x1ff) 9 in
-  reg.(r0) <- mem_read vm ((reg.(r_pc) + pc_offset) land 0xffff);
+  reg.(r0) <- mem_read vm ((pc + pc_offset) land 0xffff);
   update_flags vm r0
 
-let exec_ldi ({ reg; _ } as vm) instr =
+let exec_ldi ({ reg; pc; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let pc_offset = sign_extend (instr land 0x1ff) 9 in
-  reg.(r0) <- mem_read vm (mem_read vm ((reg.(r_pc) + pc_offset) land 0xffff));
+  reg.(r0) <- mem_read vm (mem_read vm ((pc + pc_offset) land 0xffff));
   update_flags vm r0
 
 let exec_ldr ({ reg; _ } as vm) instr =
@@ -229,21 +227,21 @@ let exec_ldr ({ reg; _ } as vm) instr =
   reg.(r0) <- mem_read vm ((reg.(r1) + offset) land 0xffff);
   update_flags vm r0
 
-let exec_lea ({ reg; _ } as vm) instr =
+let exec_lea ({ reg; pc; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let pc_offset = sign_extend (instr land 0x1ff) 9 in
-  reg.(r0) <- (reg.(r_pc) + pc_offset) land 0xffff;
+  reg.(r0) <- (pc + pc_offset) land 0xffff;
   update_flags vm r0
 
-let exec_st ({ reg; _ } as vm) instr =
+let exec_st ({ reg; pc; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let pc_offset = sign_extend (instr land 0x1ff) 9 in
-  mem_write vm ((reg.(r_pc) + pc_offset) land 0xffff) reg.(r0)
+  mem_write vm ((pc + pc_offset) land 0xffff) reg.(r0)
 
-let exec_sti ({ reg; _ } as vm) instr =
+let exec_sti ({ reg; pc; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
   let pc_offset = sign_extend (instr land 0x1ff) 9 in
-  mem_write vm (mem_read vm ((reg.(r_pc) + pc_offset) land 0xffff)) reg.(r0)
+  mem_write vm (mem_read vm ((pc + pc_offset) land 0xffff)) reg.(r0)
 
 let exec_str ({ reg; _ } as vm) instr =
   let r0 = (instr lsr 9) land 0x7 in
@@ -252,16 +250,16 @@ let exec_str ({ reg; _ } as vm) instr =
   mem_write vm ((reg.(r1) + offset) land 0xffff) reg.(r0)
 
 let exec_trap_getc ({ reg; _ } as vm) =
-  reg.(r_r0) <- input_char stdin |> int_of_char;
-  update_flags vm r_r0
+  reg.(0) <- input_char stdin |> int_of_char;
+  update_flags vm 0
 
 let exec_trap_out { reg; _ } =
-  output_char stdout (reg.(r_r0) |> char_of_int);
+  output_char stdout (reg.(0) |> char_of_int);
   flush stdout
 
 let exec_trap_puts { memory; reg; _ } =
   let rec aux i =
-    let c = memory.(reg.(r_r0) + i) in
+    let c = memory.(reg.(0) + i) in
     if c = 0 then ()
     else (
       output_char stdout (char_of_int c);
@@ -276,12 +274,12 @@ let exec_trap_in ({ reg; _ } as vm) =
   let c = input_char stdin in
   output_char stdout c;
   flush stdout;
-  reg.(r_r0) <- int_of_char c;
-  update_flags vm r_r0
+  reg.(0) <- int_of_char c;
+  update_flags vm 0
 
 let exec_trap_putsp { memory; reg; _ } =
   let rec aux i =
-    let c = memory.(reg.(r_r0) + i) in
+    let c = memory.(reg.(0) + i) in
     if c = 0 then ()
     else
       let char1 = c land 0xff in
@@ -302,8 +300,8 @@ let exec_trap_halt vm =
   flush stdout;
   vm.running <- false
 
-let exec_trap ({ reg; _ } as vm) instr =
-  reg.(r_r7) <- reg.(r_pc);
+let exec_trap ({ reg; pc; _ } as vm) instr =
+  reg.(7) <- pc;
   match instr land 0xff |> trapcode_of_int with
   | Trap_getc -> exec_trap_getc vm
   | Trap_out -> exec_trap_out vm
@@ -312,14 +310,14 @@ let exec_trap ({ reg; _ } as vm) instr =
   | Trap_putsp -> exec_trap_putsp vm
   | Trap_halt -> exec_trap_halt vm
 
-let run ({ reg; running; _ } as vm) =
+let run vm =
   let rec aux () =
-    (if not running then ()
+    if not vm.running then ()
     else
-      let pc = reg.(r_pc) in
-      reg.(r_pc) <- pc + 1;
+      let pc = vm.pc in
+      vm.pc <- pc + 1;
       let instr = mem_read vm pc in
-      match instr lsr 12 |> opcode_of_int with
+      (match instr lsr 12 |> opcode_of_int with
       | Op_add -> exec_add vm instr
       | Op_and -> exec_and vm instr
       | Op_not -> exec_not vm instr
@@ -336,7 +334,7 @@ let run ({ reg; running; _ } as vm) =
       | Op_trap -> exec_trap vm instr
       | Op_rti -> failwith "RTI"
       | Op_res -> failwith "RES");
-    aux ()
+      aux ()
   in
   aux ()
 
