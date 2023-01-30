@@ -139,13 +139,20 @@ let mem_read { memory; _ } address =
 
 let mem_write { memory; _ } address value = memory.(address) <- value
 
+let bits ?(pos = 0) ~width n =
+  let mask = (1 lsl width) - 1 in
+  (n lsr pos) land mask
+
 let sign_extend x bit_count =
-  if (x lsr (bit_count - 1)) land 1 = 0 then x else x lor (0xffff lsl bit_count)
+  if bits x ~pos:(bit_count - 1) ~width:1 = 0 then x
+  else x lor (0xffff lsl bit_count)
+
+let signed_bits ?(pos = 0) ~width n = sign_extend (bits ~pos ~width n) width
 
 let update_flags ({ reg; _ } as vm) r =
   let fl =
     if reg.(r) = 0 then fl_zro
-    else if reg.(r) lsr 15 <> 0 then
+    else if bits reg.(r) ~pos:15 ~width:1 <> 0 then
       (* A 1 in the left-most bit indicates negative. *)
       fl_neg
     else fl_pos
@@ -156,98 +163,98 @@ let update_flags ({ reg; _ } as vm) r =
 let ( +^ ) x y = (x + y) land 0xffff
 
 let exec_add ({ reg; _ } as vm) instr =
-  let r0 = (instr lsr 9) land 0x7 in
-  let r1 = (instr lsr 6) land 0x7 in
-  let imm_flag = (instr lsr 5) land 0x1 in
+  let r0 = bits instr ~pos:9 ~width:3 in
+  let r1 = bits instr ~pos:6 ~width:3 in
+  let imm_flag = bits instr ~pos:5 ~width:1 in
   let operand =
     if imm_flag = 0 then
-      let r2 = instr land 0x7 in
+      let r2 = bits instr ~width:3 in
       reg.(r2)
-    else sign_extend (instr land 0x1f) 5
+    else signed_bits instr ~width:5
   in
   reg.(r0) <- reg.(r1) +^ operand;
   update_flags vm r0
 
 let exec_and ({ reg; _ } as vm) instr =
-  let r0 = (instr lsr 9) land 0x7 in
-  let r1 = (instr lsr 6) land 0x7 in
-  let imm_flag = (instr lsr 5) land 0x1 in
+  let r0 = bits instr ~pos:9 ~width:3 in
+  let r1 = bits instr ~pos:6 ~width:3 in
+  let imm_flag = bits instr ~pos:5 ~width:1 in
   let operand =
     if imm_flag = 0 then
-      let r2 = instr land 0x7 in
+      let r2 = bits instr ~width:3 in
       reg.(r2)
-    else sign_extend (instr land 0x1f) 5
+    else signed_bits instr ~width:5
   in
   reg.(r0) <- reg.(r1) land operand;
   update_flags vm r0
 
 let exec_not ({ reg; _ } as vm) instr =
-  let r0 = (instr lsr 9) land 0x7 in
-  let r1 = (instr lsr 6) land 0x7 in
+  let r0 = bits instr ~pos:9 ~width:3 in
+  let r1 = bits instr ~pos:6 ~width:3 in
   reg.(r0) <- lnot reg.(r1) land 0xffff;
   update_flags vm r0
 
 let exec_br ({ cond; pc; _ } as vm) instr =
-  let pc_offset = sign_extend (instr land 0x1ff) 9 in
-  let cond_flag = (instr lsr 9) land 0x7 in
+  let pc_offset = signed_bits instr ~width:9 in
+  let cond_flag = bits instr ~pos:9 ~width:3 in
   if cond_flag land cond <> 0 then vm.pc <- pc +^ pc_offset
 
 let exec_jmp ({ reg; _ } as vm) instr =
-  let r1 = (instr lsr 6) land 0x7 in
+  let r1 = bits instr ~pos:6 ~width:3 in
   vm.pc <- reg.(r1)
 
 let exec_jsr ({ reg; pc; _ } as vm) instr =
-  let long_flag = (instr lsr 11) land 1 in
+  let long_flag = bits instr ~pos:11 ~width:1 in
   let dest =
     if long_flag = 0 then
-      let r1 = (instr lsr 6) land 0x7 in
+      let r1 = bits instr ~pos:6 ~width:3 in
       reg.(r1)
     else
-      let long_pc_offset = sign_extend (instr land 0x7ff) 11 in
+      let long_pc_offset = signed_bits instr ~width:11 in
       pc +^ long_pc_offset
   in
   reg.(7) <- pc;
   vm.pc <- dest
 
 let exec_ld ({ reg; pc; _ } as vm) instr =
-  let r0 = (instr lsr 9) land 0x7 in
-  let pc_offset = sign_extend (instr land 0x1ff) 9 in
+  let r0 = bits instr ~pos:9 ~width:3 in
+  let pc_offset = signed_bits instr ~width:9 in
   reg.(r0) <- mem_read vm (pc +^ pc_offset);
   update_flags vm r0
 
 let exec_ldi ({ reg; pc; _ } as vm) instr =
-  let r0 = (instr lsr 9) land 0x7 in
-  let pc_offset = sign_extend (instr land 0x1ff) 9 in
+  let r0 = bits instr ~pos:9 ~width:3 in
+  let pc_offset = signed_bits instr ~width:9 in
   reg.(r0) <- mem_read vm (mem_read vm (pc +^ pc_offset));
   update_flags vm r0
 
 let exec_ldr ({ reg; _ } as vm) instr =
-  let r0 = (instr lsr 9) land 0x7 in
-  let r1 = (instr lsr 6) land 0x7 in
-  let offset = sign_extend (instr land 0x3f) 6 in
+  let r0 = bits instr ~pos:9 ~width:3 in
+  let r1 = bits instr ~pos:6 ~width:3 in
+  let offset = signed_bits instr ~width:6 in
   reg.(r0) <- mem_read vm (reg.(r1) +^ offset);
   update_flags vm r0
 
 let exec_lea ({ reg; pc; _ } as vm) instr =
-  let r0 = (instr lsr 9) land 0x7 in
-  let pc_offset = sign_extend (instr land 0x1ff) 9 in
+  let r0 = bits instr ~pos:9 ~width:3 in
+  let pc_offset = signed_bits instr ~width:9 in
   reg.(r0) <- pc +^ pc_offset;
   update_flags vm r0
 
 let exec_st ({ reg; pc; _ } as vm) instr =
-  let r0 = (instr lsr 9) land 0x7 in
-  let pc_offset = sign_extend (instr land 0x1ff) 9 in
+  let r0 = bits instr ~pos:9 ~width:3 in
+  let pc_offset = signed_bits instr ~width:9 in
   mem_write vm (pc +^ pc_offset) reg.(r0)
 
 let exec_sti ({ reg; pc; _ } as vm) instr =
-  let r0 = (instr lsr 9) land 0x7 in
-  let pc_offset = sign_extend (instr land 0x1ff) 9 in
+  let r0 = bits instr ~pos:9 ~width:3 in
+  let pc_offset = signed_bits instr ~width:9 in
   mem_write vm (mem_read vm (pc +^ pc_offset)) reg.(r0)
 
 let exec_str ({ reg; _ } as vm) instr =
-  let r0 = (instr lsr 9) land 0x7 in
-  let r1 = (instr lsr 6) land 0x7 in
-  let offset = sign_extend (instr land 0x3f) 6 in
+  let r0 = bits instr ~pos:9 ~width:3 in
+  let r1 = bits instr ~pos:6 ~width:3 in
+  let offset = signed_bits instr ~width:6 in
   mem_write vm (reg.(r1) +^ offset) reg.(r0)
 
 let exec_trap_getc ({ reg; _ } as vm) =
@@ -255,7 +262,7 @@ let exec_trap_getc ({ reg; _ } as vm) =
   update_flags vm 0
 
 let exec_trap_out { reg; _ } =
-  output_char stdout (reg.(0) |> char_of_int);
+  output_char stdout (char_of_int reg.(0));
   flush stdout
 
 let exec_trap_puts { memory; reg; _ } =
@@ -283,11 +290,11 @@ let exec_trap_putsp { memory; reg; _ } =
     let c = memory.(reg.(0) + i) in
     if c = 0 then ()
     else
-      let char1 = c land 0xff in
+      let char1 = bits c ~width:8 in
       if char1 = 0 then ()
       else (
         output_char stdout (char_of_int char1);
-        let char2 = c lsr 8 in
+        let char2 = bits c ~pos:8 ~width:8 in
         if char2 = 0 then ()
         else (
           output_char stdout (char_of_int char2);
@@ -303,13 +310,16 @@ let exec_trap_halt vm =
 
 let exec_trap ({ reg; pc; _ } as vm) instr =
   reg.(7) <- pc;
-  match instr land 0xff |> trapcode_of_int with
-  | Trap_getc -> exec_trap_getc vm
-  | Trap_out -> exec_trap_out vm
-  | Trap_puts -> exec_trap_puts vm
-  | Trap_in -> exec_trap_in vm
-  | Trap_putsp -> exec_trap_putsp vm
-  | Trap_halt -> exec_trap_halt vm
+  let exec =
+    match bits instr ~width:8 |> trapcode_of_int with
+    | Trap_getc -> exec_trap_getc
+    | Trap_out -> exec_trap_out
+    | Trap_puts -> exec_trap_puts
+    | Trap_in -> exec_trap_in
+    | Trap_putsp -> exec_trap_putsp
+    | Trap_halt -> exec_trap_halt
+  in
+  exec vm
 
 let run vm =
   let rec aux () =
@@ -318,23 +328,26 @@ let run vm =
       let pc = vm.pc in
       vm.pc <- pc + 1;
       let instr = mem_read vm pc in
-      (match instr lsr 12 |> opcode_of_int with
-      | Op_add -> exec_add vm instr
-      | Op_and -> exec_and vm instr
-      | Op_not -> exec_not vm instr
-      | Op_br -> exec_br vm instr
-      | Op_jmp -> exec_jmp vm instr
-      | Op_jsr -> exec_jsr vm instr
-      | Op_ld -> exec_ld vm instr
-      | Op_ldi -> exec_ldi vm instr
-      | Op_ldr -> exec_ldr vm instr
-      | Op_lea -> exec_lea vm instr
-      | Op_st -> exec_st vm instr
-      | Op_sti -> exec_sti vm instr
-      | Op_str -> exec_str vm instr
-      | Op_trap -> exec_trap vm instr
-      | Op_rti -> failwith "RTI"
-      | Op_res -> failwith "RES");
+      let exec =
+        match bits instr ~pos:12 ~width:4 |> opcode_of_int with
+        | Op_add -> exec_add
+        | Op_and -> exec_and
+        | Op_not -> exec_not
+        | Op_br -> exec_br
+        | Op_jmp -> exec_jmp
+        | Op_jsr -> exec_jsr
+        | Op_ld -> exec_ld
+        | Op_ldi -> exec_ldi
+        | Op_ldr -> exec_ldr
+        | Op_lea -> exec_lea
+        | Op_st -> exec_st
+        | Op_sti -> exec_sti
+        | Op_str -> exec_str
+        | Op_trap -> exec_trap
+        | Op_rti -> failwith "RTI"
+        | Op_res -> failwith "RES"
+      in
+      exec vm instr;
       aux ()
   in
   aux ()
